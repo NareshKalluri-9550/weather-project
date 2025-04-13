@@ -1,7 +1,8 @@
 import pytest
-from app import app, convert_units
-from unittest.mock import patch
+from app import app, convert_units, validate_units
+from unittest.mock import patch, MagicMock
 import json
+import requests
 
 @pytest.fixture
 def client():
@@ -9,69 +10,144 @@ def client():
     with app.test_client() as client:
         yield client
 
+def test_validate_units():
+    # Test valid units
+    validate_units('temperature', 'celsius')
+    validate_units('temperature', 'fahrenheit')
+    validate_units('temperature', 'kelvin')
+    validate_units('pressure', 'hpa')
+    validate_units('pressure', 'atm')
+    validate_units('pressure', 'mmhg')
+    validate_units('pollutant', 'ppm')
+    validate_units('pollutant', 'ppb')
+    validate_units('pollutant', 'µg/m³')
+    
+    # Test invalid units
+    with pytest.raises(ValueError) as excinfo:
+        validate_units('temperature', 'invalid')
+    assert "Invalid units for temperature" in str(excinfo.value)
+    
+    with pytest.raises(ValueError) as excinfo:
+        validate_units('pressure', 'invalid')
+    assert "Invalid units for pressure" in str(excinfo.value)
+    
+    with pytest.raises(ValueError) as excinfo:
+        validate_units('pollutant', 'invalid')
+    assert "Invalid units for pollutant" in str(excinfo.value)
+    
+    # Test invalid parameter
+    with pytest.raises(ValueError) as excinfo:
+        validate_units('invalid', 'celsius')
+    assert "Invalid parameter" in str(excinfo.value)
+
 def test_temperature_conversion():
-    """Test temperature unit conversions with proper rounding"""
-    assert convert_units(300, 'kelvin', 'celsius') == pytest.approx(26.85, abs=1e-2)
-    assert convert_units(300, 'kelvin', 'fahrenheit') == pytest.approx(80.33, abs=1e-2)
+    assert convert_units(273.15, 'kelvin', 'celsius', 'temperature') == 0
+    assert convert_units(300, 'kelvin', 'fahrenheit', 'temperature') == pytest.approx(80.33, 0.01)
+    assert convert_units(300, 'kelvin', 'kelvin', 'temperature') == 300
+    
+    assert convert_units(0, 'celsius', 'kelvin', 'temperature') == 273.15
+    assert convert_units(100, 'celsius', 'fahrenheit', 'temperature') == 212
+    assert convert_units(25, 'celsius', 'celsius', 'temperature') == 25
+    
+    assert convert_units(32, 'fahrenheit', 'celsius', 'temperature') == 0
+    assert convert_units(212, 'fahrenheit', 'kelvin', 'temperature') == pytest.approx(373.15, 0.01)
+    assert convert_units(50, 'fahrenheit', 'fahrenheit', 'temperature') == 50
 
 def test_pressure_conversion():
-    """Test pressure unit conversions"""
-    assert convert_units(1013, 'hpa', 'atm') == pytest.approx(1.0, 0.001)
+    assert convert_units(1013.25, 'hpa', 'atm', 'pressure') == pytest.approx(1, 0.001)
+    assert convert_units(1013.25, 'hpa', 'mmhg', 'pressure') == pytest.approx(760, 0.1)
+    assert convert_units(1000, 'hpa', 'hpa', 'pressure') == 1000
+    
+    assert convert_units(1, 'atm', 'hpa', 'pressure') == pytest.approx(1013.25, 0.01)
+    assert convert_units(1, 'atm', 'mmhg', 'pressure') == 760
+    assert convert_units(1, 'atm', 'atm', 'pressure') == 1
+    
+    assert convert_units(760, 'mmhg', 'hpa', 'pressure') == pytest.approx(1013.25, 0.1)
+    assert convert_units(760, 'mmhg', 'atm', 'pressure') == 1
+    assert convert_units(700, 'mmhg', 'mmhg', 'pressure') == 700
 
-@patch('app.requests.get')
-def test_get_temperature(mock_get, client):
-    """Test temperature endpoint"""
-    # Mock response
-    mock_get.return_value.json.return_value = {'value': 300}
-    mock_get.return_value.status_code = 200
+def test_pollutant_conversion():
+    assert convert_units(1, 'ppm', 'ppb', 'pollutant') == 1000
+    assert convert_units(1, 'ppm', 'µg/m³', 'pollutant') == 1000
+    assert convert_units(1, 'ppm', 'ppm', 'pollutant') == 1
+    
+    assert convert_units(1000, 'ppb', 'ppm', 'pollutant') == 1
+    assert convert_units(1000, 'ppb', 'µg/m³', 'pollutant') == 1000
+    assert convert_units(500, 'ppb', 'ppb', 'pollutant') == 500
+    
+    assert convert_units(1000, 'µg/m³', 'ppm', 'pollutant') == 1
+    assert convert_units(1000, 'µg/m³', 'ppb', 'pollutant') == 1000
+    assert convert_units(500, 'µg/m³', 'µg/m³', 'pollutant') == 500
+
+@patch('requests.get')
+def test_temperature_endpoint(mock_get, client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {'value': 293.15}  # 20°C in Kelvin
+    mock_get.return_value = mock_response
     
     response = client.post(
-        '/weather/temperature',
-        json={'city': 'London', 'units': 'Celsius'}
+        '/temperature',
+        json={'units': 'celsius'}
     )
+    data = json.loads(response.data)
+    
     assert response.status_code == 200
-    assert response.json['temperature'] == 26.85
-    assert response.json['units'] == 'celsius'
+    assert data['parameter'] == 'temperature'
+    assert data['measured_value'] == 20
+    assert data['units'] == 'celsius'
+    assert data['original_value'] == 293.15
+    assert data['original_units'] == 'kelvin'
 
-@patch('app.requests.get')
-def test_get_pressure(mock_get, client):
-    """Test pressure endpoint"""
-    # Mock response
-    mock_get.return_value.json.return_value = {'value': 1013}
-    mock_get.return_value.status_code = 200
+@patch('requests.get')
+def test_pressure_endpoint(mock_get, client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {'value': 1013.25}  # 1 atm in hPa
+    mock_get.return_value = mock_response
     
     response = client.post(
-        '/weather/pressure',
-        json={'city': 'London', 'units': 'atm'}
+        '/pressure',
+        json={'units': 'atm'}
+    )
+    data = json.loads(response.data)
+    
+    assert response.status_code == 200
+    assert data['parameter'] == 'pressure'
+    assert data['measured_value'] == pytest.approx(1, 0.001)
+    assert data['units'] == 'atm'
+    assert data['original_value'] == 1013.25
+    assert data['original_units'] == 'hpa'
+
+@patch('requests.get')
+def test_pollutant_endpoint(mock_get, client):
+    # Test successful case
+    success_mock = MagicMock()
+    success_mock.status_code = 200
+    success_mock.json.return_value = {'value': 1}  # 1 ppm
+    success_mock.raise_for_status.return_value = None
+    
+    # Test error case
+    error_mock = MagicMock()
+    error_mock.status_code = 500
+    error_mock.raise_for_status.side_effect = requests.exceptions.HTTPError("500 Server Error")
+    
+    # First test successful response
+    mock_get.return_value = success_mock
+    response = client.post(
+        '/pollutant',
+        json={'units': 'ppb'}
     )
     assert response.status_code == 200
-    assert response.json['pressure'] == pytest.approx(1.0, 0.001)
-    assert response.json['units'] == 'atm'
-
-def test_invalid_city(client):
-    """Test missing city parameter"""
+    data = json.loads(response.data)
+    assert data['measured_value'] == 1000
+    
+    # Then test error response
+    mock_get.return_value = error_mock
     response = client.post(
-        '/weather/temperature',
-        json={'units': 'Celsius'}  # Missing city
+        '/pollutant',
+        json={'units': 'ppb'}
     )
-    assert response.status_code == 400
-    assert 'Missing required parameters' in response.json['error']
-
-def test_invalid_units_for_temperature(client):
-    """Test invalid temperature units"""
-    response = client.post(
-        '/weather/temperature',
-        json={'city': 'London', 'units': 'Kelvin'}  # Invalid unit
-    )
-    assert response.status_code == 400
-    assert 'Invalid units for temperature' in response.json['error']
-
-def test_invalid_units_for_pressure(client):
-    """Test invalid pressure units"""
-    response = client.post(
-        '/weather/pressure',
-        json={'city': 'London', 'units': 'mmHg'}  # Invalid unit
-    )
-    assert response.status_code == 400
-    assert 'Invalid units for pressure' in response.json['error']
-
+    assert response.status_code == 502
+    error_data = json.loads(response.data)
+    assert 'Pollutant service error' in error_data['error']
